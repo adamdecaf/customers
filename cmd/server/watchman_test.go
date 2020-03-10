@@ -14,6 +14,7 @@ import (
 
 	"github.com/moov-io/base"
 	"github.com/moov-io/base/docker"
+	"github.com/moov-io/watchman/admin"
 	watchman "github.com/moov-io/watchman/client"
 
 	"github.com/go-kit/kit/log"
@@ -64,7 +65,7 @@ func spawnWatchman(t *testing.T) *watchmanDeployment {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource, err := pool.RunWithOptions(&dockertest.RunOptions{
+	container, err := pool.RunWithOptions(&dockertest.RunOptions{
 		Repository: "moov/watchman",
 		Tag:        "static",
 		Cmd:        []string{"-http.addr=:8080"},
@@ -73,14 +74,39 @@ func spawnWatchman(t *testing.T) *watchmanDeployment {
 		t.Fatal(err)
 	}
 
-	client := newWatchmanClient(log.NewNopLogger(), fmt.Sprintf("http://localhost:%s", resource.GetPort("8080/tcp")))
+	admin := setupAdminClient(container)
+	client := newWatchmanClient(log.NewNopLogger(), fmt.Sprintf("http://localhost:%s", container.GetPort("8080/tcp")))
 	err = pool.Retry(func() error {
-		return client.Ping()
+		if err := client.Ping(); err != nil {
+			return fmt.Errorf("ping: %v", err)
+		}
+		version, err := getRunningVersion(admin)
+		if version != "" {
+			t.Logf("running Watchman %s", version)
+		}
+		return fmt.Errorf("version: %v", err)
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &watchmanDeployment{resource, client}
+	return &watchmanDeployment{container, client}
+}
+
+func setupAdminClient(container *dockertest.Resource) *admin.APIClient {
+	conf := admin.NewConfiguration()
+	conf.BasePath = fmt.Sprintf("http://localhost:%s", container.GetPort("9090/tcp"))
+	return admin.NewAPIClient(conf)
+}
+
+func getRunningVersion(api *admin.APIClient) (string, error) {
+	version, resp, err := api.AdminApi.GetVersion(context.Background())
+	if resp != nil && resp.Body != nil {
+		return "", err
+	}
+	if err != nil {
+		return "", err
+	}
+	return version, nil
 }
 
 func TestWatchman__client(t *testing.T) {
